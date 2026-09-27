@@ -1,0 +1,8 @@
+{
+  "name": "@ecommerce/worker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": { "dev": "tsx watch src/index.ts", "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": { "@ecommerce/shared": "*", "dotenv": "^16.4.7", "kafkajs": "^2.2.4", "mongoose": "^8.9.5" },
+  "devDependencies": { "tsx": "^4.19.2", "typescript": "^5.7.3" }
+}

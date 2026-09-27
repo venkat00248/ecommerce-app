@@ -1,0 +1,123 @@
+pipeline:
+  name: ecommerce-gke
+  identifier: ecommerce_gke
+  projectIdentifier: <+input>
+  orgIdentifier: <+input>
+  properties:
+    ci:
+      codebase:
+        connectorRef: <+input>
+        build: <+input>
+  variables:
+    - name: gcpProjectId
+      type: String
+      required: true
+      value: <+input>
+    - name: gcpRegion
+      type: String
+      required: true
+      value: us-central1
+    - name: gkeCluster
+      type: String
+      required: true
+      value: ecommerce
+    - name: gkeNamespace
+      type: String
+      required: true
+      value: ecommerce
+    - name: imageTag
+      type: String
+      required: true
+      value: <+codebase.commitSha>
+  stages:
+    - stage:
+        name: Build and deploy
+        identifier: build_and_deploy
+        type: CI
+        spec:
+          cloneCodebase: true
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: <+input>
+              namespace: harness-ci
+              automountServiceAccountToken: true
+              nodeSelector: {}
+              os: Linux
+          execution:
+            steps:
+              - step:
+                  name: Validate
+                  identifier: validate
+                  type: Run
+                  spec:
+                    shell: Bash
+                    image: node:20-bookworm
+                    command: |-
+                      npm ci
+                      npm run lint
+                      npm run typecheck
+                      npm run build
+              - step:
+                  name: Build and push images
+                  identifier: build_and_push
+                  type: Run
+                  spec:
+                    shell: Bash
+                    image: google/cloud-sdk:slim
+                    envVariables:
+                      GCP_PROJECT_ID: <+pipeline.variables.gcpProjectId>
+                      GCP_REGION: <+pipeline.variables.gcpRegion>
+                      IMAGE_TAG: <+pipeline.variables.imageTag>
+                      GCP_SERVICE_ACCOUNT_KEY: <+secrets.getValue("harness_gcp_service_account_key")>
+                    command: |-
+                      set -euo pipefail
+                      printf '%s' "$GCP_SERVICE_ACCOUNT_KEY" > /tmp/gcp-key.json
+                      gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+                               $env:Path += ";C:\Program Files\Git\cmd"
+                      
+                      git config --global user.name "venkat"
+                      git config --global user.email "venkat00248@gmail.com"             gcloud config set project "$GCP_PROJECT_ID"
+                      gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+                      GAR_HOST="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/ecommerce"
+                      gcloud builds submit --tag "$GAR_HOST/api:$IMAGE_TAG" --file docker/api.Dockerfile .
+                      gcloud builds submit --tag "$GAR_HOST/worker:$IMAGE_TAG" --file docker/worker.Dockerfile .
+                      gcloud builds submit --tag "$GAR_HOST/web:$IMAGE_TAG" --file docker/web.Dockerfile .
+                      rm -f /tmp/gcp-key.json
+              - step:
+                  name: Deploy to GKE
+                  identifier: deploy_to_gke
+                  type: Run
+                  spec:
+                    shell: Bash
+                    image: google/cloud-sdk:latest
+                    envVariables:
+                      GCP_PROJECT_ID: <+pipeline.variables.gcpProjectId>
+                      GCP_REGION: <+pipeline.variables.gcpRegion>
+                      GKE_CLUSTER: <+pipeline.variables.gkeCluster>
+                      GKE_NAMESPACE: <+pipeline.variables.gkeNamespace>
+                      IMAGE_TAG: <+pipeline.variables.imageTag>
+                      MONGO_URI: <+secrets.getValue("harness_mongo_uri")>
+                      KAFKA_BROKERS: <+secrets.getValue("harness_kafka_brokers")>
+                      GCP_SERVICE_ACCOUNT_KEY: <+secrets.getValue("harness_gcp_service_account_key")>
+                    command: |-
+                      set -euo pipefail
+                      gcloud components install kubectl gke-gcloud-auth-plugin --quiet
+                      printf '%s' "$GCP_SERVICE_ACCOUNT_KEY" > /tmp/gcp-key.json
+                      gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+                      gcloud container clusters get-credentials "$GKE_CLUSTER" --region "$GCP_REGION" --project "$GCP_PROJECT_ID"
+                      kubectl create namespace "$GKE_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+                      kubectl -n "$GKE_NAMESPACE" create secret generic ecommerce-secrets \
+                        --from-literal=MONGO_URI="$MONGO_URI" \
+                        --from-literal=KAFKA_BROKERS="$KAFKA_BROKERS" \
+                        --dry-run=client -o yaml | kubectl apply -f -
+                      GAR_HOST="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/ecommerce"
+                      sed -e "s#REGION-docker.pkg.dev/PROJECT/ecommerce#${GAR_HOST}#g" -e "s#:latest#:${IMAGE_TAG}#g" infra/kubernetes/api.yaml | kubectl -n "$GKE_NAMESPACE" apply -f -
+                      sed -e "s#REGION-docker.pkg.dev/PROJECT/ecommerce#${GAR_HOST}#g" -e "s#:latest#:${IMAGE_TAG}#g" infra/kubernetes/worker.yaml | kubectl -n "$GKE_NAMESPACE" apply -f -
+                      sed -e "s#REGION-docker.pkg.dev/PROJECT/ecommerce#${GAR_HOST}#g" -e "s#:latest#:${IMAGE_TAG}#g" infra/kubernetes/web.yaml | kubectl -n "$GKE_NAMESPACE" apply -f -
+                      kubectl -n "$GKE_NAMESPACE" rollout status deployment/ecommerce-api --timeout=180s
+                      kubectl -n "$GKE_NAMESPACE" rollout status deployment/ecommerce-worker --timeout=180s
+                      kubectl -n "$GKE_NAMESPACE" rollout status deployment/ecommerce-web --timeout=180s
+        when:
+          pipelineStatus: Success
+  notificationRules: []
